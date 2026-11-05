@@ -216,14 +216,16 @@ function getReason(p, words) {
   return r;
 }
 function setStaffLevel(t, lvl) {
-  if (!t.dk) return false;                    // sem identificador do aparelho nao da para salvar cargo
+  if (!t.dk) return false;
+  const eraStaff = t.level > 0;                    // sem identificador do aparelho nao da para salvar cargo
   if (lvl <= 0) {
     delete db.staff[t.dk];
     if (t.skin === "adm") { t.skin = "normal"; db.skins[t.dk] = "normal"; }
     t.invis = false; t.god = false;
   } else {
     db.staff[t.dk] = { level: lvl, name: t.name };
-    if (t.skin === "normal") { t.skin = "adm"; db.skins[t.dk] = "adm"; }   // quem vira ADM ganha a skin de ADM
+    // quem VIRA ADM (antes era jogador comum) sempre ganha a skin de ADM, mesmo que tivesse outra skin salva
+    if (t.skin === "normal" || !eraStaff) { t.skin = "adm"; db.skins[t.dk] = "adm"; }
   }
   t.level = lvl;
   saveDb();
