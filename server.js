@@ -30,12 +30,7 @@ const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "darkrise_data.j
 const MAX_PLAYERS = 24;
 const TICK_HZ = 15;
 const VISIBLE_DIST = 200;
-const MAX_MSG_PER_SEC = 40;                // mensagens normais (posicao, chat, soco...) por segundo
-const MAX_VOICE_PER_SEC = 60;              // pacotes de voz por segundo (limite separado, nao divide com o resto)
-const MAX_RAW_PER_SEC = 140;               // protecao geral contra flood (soma de tudo)
-const VOICE_MAX_B64 = 8000;                // tamanho maximo de um pacote de voz (texto base64)
-// Distancia (em metros) em que os jogadores se ouvem. Para mudar sem editar o codigo: variavel VOICE_DIST no Render.
-const VOICE_DIST = Math.max(1, Number(process.env.VOICE_DIST) || 20);
+const MAX_MSG_PER_SEC = 80;
 const CHAT_COOLDOWN_MS = 700;
 const NAME_RE = /^[A-Z][a-z]{1,14}_[A-Z][a-z]{1,14}$/;   // Rafael_Santos
 const WORLD_HALF = 360;                                  // (antigo) usado so por comandos antigos
@@ -789,16 +784,13 @@ const server = http.createServer((req, res) => {
   res.end("DARK RISE servidor no ar. Jogadores online: " + onlineCount());
 });
 
-// maxPayload precisa ser MAIOR que um pacote de voz (VOICE_MAX_B64 + envelope JSON); com 1024 o ws
-// derrubava a conexao do jogador na primeira fala.
-const wss = new WebSocketServer({ server, maxPayload: VOICE_MAX_B64 + 512 });
+const wss = new WebSocketServer({ server, maxPayload: 4096 });
 
 // ---------------------------------------------------------------- conexoes
 wss.on("connection", (ws) => {
   const id = freeId();
   if (id === 0) { ws.close(1013, "servidor cheio"); return; }
   const p = { id, ws, st: null, hadNear: false, msgs: 0, alive: true, joined: false,
-              raw: 0, vmsgs: 0,
               name: "", gender: "m", dev: "", dk: "", level: 0, invis: false, skin: "normal",
               police: "", god: false, lastChat: 0, fails: [], cmdBlock: 0 };
   players.set(id, p);
@@ -806,18 +798,11 @@ wss.on("connection", (ws) => {
   ws.on("pong", () => { p.alive = true; });
 
   ws.on("message", (data) => {
-    p.raw++;
-    if (p.raw > MAX_RAW_PER_SEC) return;
+    p.msgs++;
+    if (p.msgs > MAX_MSG_PER_SEC) return;
     let m;
     try { m = JSON.parse(data.toString()); } catch (e) { return; }
     if (!m || typeof m.t !== "string") return;
-    if (m.t === "voice" || m.t === "voice_end") {
-      p.vmsgs++;
-      if (p.vmsgs > MAX_VOICE_PER_SEC) return;
-    } else {
-      p.msgs++;
-      if (p.msgs > MAX_MSG_PER_SEC) return;
-    }
 
     if (m.t === "join") {
       if (p.joined) return;
@@ -892,16 +877,14 @@ wss.on("connection", (ws) => {
     }
 
     if (m.t === "voice") {
-      // Audio push-to-talk: somente jogadores a ate VOICE_DIST metros recebem.
-      if (typeof m.d !== "string" || m.d.length === 0 || m.d.length > VOICE_MAX_B64 || !p.st) return;
-      if (muteInfo(p)) return;                       // silenciado no chat tambem nao fala por voz
-      const audio = JSON.stringify({ t: "voice", id: p.id, d: m.d });   // serializa uma vez so
-      const max2 = VOICE_DIST * VOICE_DIST;
+      // Audio push-to-talk: somente jogadores a ate 20 metros recebem.
+      if (typeof m.d !== "string" || m.d.length > 6000 || !p.st) return;
+      const audio = { t: "voice", id: p.id, d: m.d };
+      const max2 = 20 * 20;
       for (const [oid, other] of players) {
         if (oid === p.id || !other.joined || !other.st) continue;
-        if (other.ws.readyState !== 1 || other.ws.bufferedAmount > 262144) continue;   // nao acumula audio atrasado
         const dx = other.st[0] - p.st[0], dy = other.st[1] - p.st[1], dz = other.st[2] - p.st[2];
-        if (dx * dx + dy * dy + dz * dz <= max2) other.ws.send(audio);
+        if (dx * dx + dy * dy + dz * dz <= max2) send(other.ws, audio);
       }
       return;
     }
@@ -972,7 +955,7 @@ setInterval(() => {
   }
 }, 1000 / TICK_HZ);
 
-setInterval(() => { for (const p of players.values()) { p.msgs = 0; p.raw = 0; p.vmsgs = 0; } }, 1000);
+setInterval(() => { for (const p of players.values()) p.msgs = 0; }, 1000);
 
 setInterval(() => {
   for (const p of players.values()) {
