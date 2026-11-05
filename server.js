@@ -7,6 +7,8 @@
 //   OWNER_NAME   (opcional, recomendado) Nome_Sobrenome do personagem do dono. Se definido,
 //                so esse personagem consegue usar o codigo.
 //   OWNER_REBIND (opcional) "1" = deixa o dono vincular um aparelho novo (use so ao trocar de celular).
+//   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET   (login com Google) ids criados no Google Cloud (OAuth, "Aplicativo da Web").
+//                Sem elas o botao "Entrar com o Google" mostra uma mensagem de "nao configurado" e o Convidado segue funcionando.
 //   DATA_FILE    (opcional) caminho do arquivo de dados (staff, bans, logs). Padrao: ./darkrise_data.json
 //                No plano Free do Render o disco e apagado a cada deploy/reinicio; para manter os dados
 //                use um Disk do Render e aponte DATA_FILE para ele (ex.: /data/darkrise.json).
@@ -86,7 +88,7 @@ for (const u of USAGE) CMD_LEVEL[u[1].slice(1)] = u[0];
 // ---------------------------------------------------------------- dados persistentes
 // Aparelhos sao guardados so como hash (se o arquivo vazar, ninguem consegue se passar por um ADM).
 const EMPTY_DB = () => ({
-  ownerDev: "", staff: {}, police: {}, skins: {}, bans: [], banSeq: 0, mutes: {},
+  ownerDev: "", staff: {}, police: {}, skins: {}, bans: [], banSeq: 0, mutes: {}, glink: {},
   history: [], logs: [], maintenance: false,
 });
 function loadDb() {
@@ -646,7 +648,126 @@ const PUNCH_DAMAGE = 7;          // dano por soco (vida maxima 100)
 const PUNCH_COOLDOWN_MS = 300;   // minimo entre dois socos do mesmo jogador
 const PUNCH_MAX_DIST = 3.6;      // distancia maxima aceita (metros)
 
+
+// ---------------------------------------------------------------- login com Google
+// Fluxo: o jogo abre o navegador em /auth/google?s=<codigo>, o Google devolve o usuario em /auth/google/callback,
+// o servidor guarda o resultado e o jogo busca em /auth/poll?s=<codigo>. O jogo recebe um TOKEN assinado
+// (vale 90 dias) e o manda no "join". A conta Google passa a ser a "chave" do jogador (cargo, skin, ban...).
+const G_ID = process.env.GOOGLE_CLIENT_ID || "";
+const G_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
+const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "https://darkrise-servidor.onrender.com").replace(/\/+$/, "");
+const G_REDIRECT = PUBLIC_URL + "/auth/google/callback";
+const AUTH_KEY = crypto.createHash("sha256").update("dr-auth:" + G_SECRET).digest();
+const AUTH_DAYS = 90;
+const STATE_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const pendingAuth = new Map();   // codigo -> { ok, token, email, name, err, exp }
+
+const b64u = (b) => Buffer.from(b).toString("base64url");
+function makeAuthToken(sub, email) {
+  const body = b64u(JSON.stringify({ s: sub, e: email, x: Date.now() + AUTH_DAYS * 86400000 }));
+  const sig = crypto.createHmac("sha256", AUTH_KEY).update(body).digest("base64url");
+  return body + "." + sig;
+}
+function verifyAuth(tok) {
+  if (!G_SECRET || typeof tok !== "string" || tok.length > 600) return null;
+  const i = tok.indexOf(".");
+  if (i < 1) return null;
+  const body = tok.slice(0, i), sig = tok.slice(i + 1);
+  const want = crypto.createHmac("sha256", AUTH_KEY).update(body).digest("base64url");
+  const a = Buffer.from(sig), b = Buffer.from(want);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const d = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!d || typeof d.s !== "string" || !d.s || !(d.x > Date.now())) return null;
+    return { sub: d.s, e: String(d.e || "") };
+  } catch (e) { return null; }
+}
+// Conta Google -> chave do jogador. A 1a vez, a conta herda a chave do aparelho (mantem cargo/skin ja existentes),
+// desde que esse aparelho ainda nao pertenca a outra conta Google.
+function accountKey(sub, devDk) {
+  if (!db.glink) db.glink = {};
+  if (db.glink[sub]) return db.glink[sub];
+  const used = devDk && Object.values(db.glink).includes(devDk);
+  const dk = devDk && !used ? devDk : keyOf("g:" + sub);
+  db.glink[sub] = dk;
+  saveDb();
+  return dk;
+}
+function cleanPending() {
+  const now = Date.now();
+  for (const [k, v] of pendingAuth) if (v.exp < now) pendingAuth.delete(k);
+  if (pendingAuth.size > 500) pendingAuth.clear();
+}
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function page(res, code, title, body) {
+  res.writeHead(code, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end('<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    "<title>" + esc(title) + '</title><style>body{background:#0c0f1a;color:#fff;font-family:sans-serif;text-align:center;padding:40px 20px}' +
+    "h1{font-size:26px}p{font-size:18px;color:#cfd6ee}a.b{display:inline-block;margin-top:22px;padding:16px 28px;background:#fff;color:#111;" +
+    "border-radius:10px;text-decoration:none;font-weight:bold;font-size:20px}</style></head><body>" + body + "</body></html>");
+}
+async function googleCallback(url, res) {
+  const code = url.searchParams.get("code") || "";
+  const state = url.searchParams.get("state") || "";
+  const slot = pendingAuth.get(state);
+  if (!STATE_RE.test(state) || !slot) { page(res, 400, "Login expirado", "<h1>Login expirado</h1><p>Volte ao jogo e toque em Entrar com o Google de novo.</p>"); return; }
+  if (!code) {
+    slot.err = "Login cancelado."; page(res, 200, "Cancelado", "<h1>Login cancelado</h1><p>Volte ao jogo.</p>"); return;
+  }
+  try {
+    const r = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code, client_id: G_ID, client_secret: G_SECRET, redirect_uri: G_REDIRECT, grant_type: "authorization_code" }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.id_token) throw new Error(j.error_description || j.error || "resposta invalida");
+    const info = JSON.parse(Buffer.from(String(j.id_token).split(".")[1], "base64url").toString("utf8"));
+    if (info.aud !== G_ID || !info.sub) throw new Error("token invalido");
+    slot.token = makeAuthToken(String(info.sub), String(info.email || ""));
+    slot.email = String(info.email || "");
+    slot.name = String(info.name || "");
+    slot.ok = true;
+    console.log("login google ok:", slot.email);
+    page(res, 200, "Login feito", "<h1>Login feito!</h1><p>Agora volte para o DARK RISE.</p>");
+  } catch (e) {
+    console.log("erro login google:", e.message);
+    slot.err = "Não foi possível entrar com o Google.";
+    page(res, 500, "Erro", "<h1>Não foi possível entrar</h1><p>Volte ao jogo e tente de novo.</p>");
+  }
+}
+function handleAuth(req, res, url) {
+  if (url.pathname === "/auth/poll") {
+    const state = url.searchParams.get("s") || "";
+    const slot = STATE_RE.test(state) ? pendingAuth.get(state) : null;
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    if (!slot) { res.end(JSON.stringify({ ok: false })); return true; }
+    if (slot.ok) { pendingAuth.delete(state); res.end(JSON.stringify({ ok: true, token: slot.token, email: slot.email, name: slot.name })); return true; }
+    if (slot.err) { pendingAuth.delete(state); res.end(JSON.stringify({ ok: false, err: slot.err })); return true; }
+    res.end(JSON.stringify({ ok: false }));
+    return true;
+  }
+  if (url.pathname === "/auth/google") {
+    if (!G_ID || !G_SECRET) { page(res, 200, "Não configurado", "<h1>Login com Google ainda não configurado</h1><p>Volte ao jogo e entre como Convidado.</p>"); return true; }
+    const state = url.searchParams.get("s") || "";
+    if (!STATE_RE.test(state)) { page(res, 400, "Erro", "<h1>Pedido inválido</h1>"); return true; }
+    cleanPending();
+    if (!pendingAuth.has(state)) pendingAuth.set(state, { ok: false, exp: Date.now() + 10 * 60000 });
+    const go = "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
+      client_id: G_ID, redirect_uri: G_REDIRECT, response_type: "code", scope: "openid email profile",
+      state, prompt: "select_account" }).toString();
+    page(res, 200, "DARK RISE", "<h1>DARK RISE</h1><p>Você abriu esta tela pelo jogo?<br>Se sim, continue com o Google.</p>" +
+      '<a class="b" href="' + esc(go) + '">Continuar com o Google</a>');
+    return true;
+  }
+  if (url.pathname === "/auth/google/callback") { googleCallback(url, res); return true; }
+  return false;
+}
+
 const server = http.createServer((req, res) => {
+  if (req.url && req.url.startsWith("/auth/")) {
+    try { if (handleAuth(req, res, new URL(req.url, "http://x"))) return; } catch (e) { res.writeHead(400); res.end("erro"); return; }
+  }
   if (req.url && req.url.startsWith("/status")) {
     res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
     res.end(JSON.stringify({ online: onlineCount(), max: MAX_PLAYERS }));
@@ -697,7 +818,10 @@ wss.on("connection", (ws) => {
           }
         }
       }
-      const dk = dev.length >= 16 ? keyOf(dev) : "";
+      let dk = dev.length >= 16 ? keyOf(dev) : "";
+      const tok = String(m.tok || "");
+      const gs = tok ? verifyAuth(tok) : null;
+      if (gs) dk = accountKey(gs.sub, dk);          // logado com Google: a conta vira a chave do jogador
       const b = banInfo(name, dk);
       if (b) {
         send(ws, { t: "banned", m: banText(b) });
@@ -717,6 +841,7 @@ wss.on("connection", (ws) => {
       if (!SKINS.includes(p.skin) || (p.skin === "adm" && p.level < 1)) p.skin = "normal";
       p.police = (dk && db.police[dk]) || "";
       send(ws, { t: "hello", id });
+      if (tok) send(ws, { t: "auth", ok: !!gs, e: gs ? gs.e : "" });
       pushStaff(p);
       if (p.level > 0) sys(p, "Bem-vindo, " + LEVEL_NAME[p.level] + ". Digite /ahelp para ver os comandos.", "ok");
       send(ws, { t: "names", d: namesMap() });
