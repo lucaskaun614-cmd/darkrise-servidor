@@ -38,10 +38,12 @@ const SKINS = ["normal", "adm", "sombra", "vermelho", "dourado", "azul"];   // p
 const POLICE_RANKS = ["cadete", "soldado", "cabo", "sargento", "tenente", "capitao", "major", "coronel"];
 const PLACES = ["deposito", "spawn"];                                      // locais do /movercarro (ver net.gd)
 
-// [nivel minimo, comando, argumentos, descricao]  -> fonte unica: o painel do jogo usa esta lista.
+// [nivel minimo, comando, argumentos, descricao]  -> fonte unica: o /ahelp usa esta lista.
 const USAGE = [
+  [1, "/ahelp", "[comando]", "Lista os comandos de ADM do seu cargo"],
   [1, "/inviz", "", "Fica invisível para jogadores comuns"],
   [1, "/uninviz", "", "Volta a ficar visível"],
+  [1, "/sairadm", "", "Remove o seu próprio cargo de ADM"],
   [1, "/mute", "ID minutos motivo", "Silencia um jogador"],
   [1, "/kick", "ID motivo", "Expulsa um jogador"],
   [2, "/ban", "ID dias motivo", "Bane por dias"],
@@ -221,6 +223,7 @@ function setStaffLevel(t, lvl) {
     t.invis = false; t.god = false;
   } else {
     db.staff[t.dk] = { level: lvl, name: t.name };
+    if (t.skin === "normal") { t.skin = "adm"; db.skins[t.dk] = "adm"; }   // quem vira ADM ganha a skin de ADM
   }
   t.level = lvl;
   saveDb();
@@ -257,7 +260,7 @@ function ownerAccess(p) {
   slog(p, "acesso-dono", p.name, "ADM 5 + skin ADM");
   pushStaff(p);
   sys(p, "Acesso do dono validado. Você agora é " + LEVEL_NAME[5] + ". Skin e emblema de ADM ativados.", "ok");
-  sys(p, "Painel ADM liberado (botão ADM no canto da tela). Use /help.", "ok");
+  sys(p, "Digite /ahelp para ver os comandos de ADM.", "ok");
 }
 
 // ---------------------------------------------------------------- comandos
@@ -272,16 +275,37 @@ function unknownCmd(p, silent) {
 const H = {
   help(p) {
     if (p.level === 0) { sys(p, "Comandos: /help", "ok"); return; }
-    const lines = ["Seu cargo: " + LEVEL_NAME[p.level], ""];
-    for (const u of USAGE) if (u[0] <= p.level) lines.push(u[1] + " " + u[2] + "  -  " + u[3]);
-    panel(p, "Comandos de " + LEVEL_NAME[p.level], lines);
+    sys(p, "Comandos de ADM: digite /ahelp (ou /ahelp nome_do_comando para ver como usar).", "ok");
   },
   ajuda(p) { H.help(p); },
+
+  // /ahelp -> lista os comandos por nivel (so do seu cargo para baixo). Jogador comum nao enxerga nem executa.
+  ahelp(p, a) {
+    const q = norm(String(a[0] || "").replace(/^\//, ""));
+    if (q) {
+      const u = USAGE.find((x) => x[1].slice(1) === q && x[0] <= p.level);
+      if (!u) { sys(p, "Comando de ADM não encontrado: " + q, "err"); return; }
+      sys(p, u[1] + " " + u[2] + "  -  " + u[3] + "  (ADM " + u[0] + "+)", "warn");
+      return;
+    }
+    sys(p, "Seu cargo: " + LEVEL_NAME[p.level] + ". Detalhes: /ahelp comando", "warn");
+    for (let lv = 1; lv <= p.level; lv++) {
+      const names = USAGE.filter((u) => u[0] === lv).map((u) => u[1]);
+      if (names.length) sys(p, "ADM " + lv + ": " + names.join(" "), "ok");
+    }
+  },
 
   inviz(p) {
     if (p.invis) { sys(p, "Você já está invisível.", "warn"); return; }
     setInvis(p, true); slog(p, "inviz", p.name, "on");
     sys(p, "Invisibilidade ATIVADA: jogadores comuns não veem você. Outros ADMs veem. /uninviz para voltar.", "ok");
+  },
+  sairadm(p) {
+    if (p.level <= 0) return;
+    const old = p.level;
+    if (!setStaffLevel(p, 0)) { sys(p, "Não foi possível salvar o cargo (aparelho sem identificação).", "err"); return; }
+    slog(p, "sairadm", p.name, "ADM " + old + " -> 0");
+    sys(p, "Você saiu do ADM e agora é jogador comum.", "warn");
   },
   uninviz(p) {
     if (!p.invis) { sys(p, "Você já está visível.", "warn"); return; }
@@ -606,6 +630,10 @@ function runCommand(id, p, text) {
 }
 
 // ---------------------------------------------------------------- http
+const PUNCH_DAMAGE = 7;          // dano por soco (vida maxima 100)
+const PUNCH_COOLDOWN_MS = 300;   // minimo entre dois socos do mesmo jogador
+const PUNCH_MAX_DIST = 3.6;      // distancia maxima aceita (metros)
+
 const server = http.createServer((req, res) => {
   if (req.url && req.url.startsWith("/status")) {
     res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
@@ -678,7 +706,7 @@ wss.on("connection", (ws) => {
       p.police = (dk && db.police[dk]) || "";
       send(ws, { t: "hello", id });
       pushStaff(p);
-      if (p.level > 0) sys(p, "Bem-vindo, " + LEVEL_NAME[p.level] + ". Use /help.", "ok");
+      if (p.level > 0) sys(p, "Bem-vindo, " + LEVEL_NAME[p.level] + ". Digite /ahelp para ver os comandos.", "ok");
       send(ws, { t: "names", d: namesMap() });
       for (const [oid, o] of players) if (o.joined && oid !== id) send(o.ws, { t: "names", d: { [id]: name } });
       sysAll(name + " (" + id + ") entrou no servidor.", "");
@@ -694,6 +722,20 @@ wss.on("connection", (ws) => {
       if (![x, y, z, yaw, speed].every(Number.isFinite)) return;
       if (Math.abs(x) > 5000 || Math.abs(y) > 5000 || Math.abs(z) > 5000) return;
       p.st = [x, y, z, yaw, speed, g ? 1 : 0, k ? 1 : 0];
+      return;
+    }
+
+    if (m.t === "hit") {
+      // Soco: o cliente diz quem acertou; o servidor confere distancia/tempo e aplica o dano.
+      const now = Date.now();
+      if (now - (p.lastHit || 0) < PUNCH_COOLDOWN_MS) return;
+      const t = players.get(Number(m.id));
+      if (!t || t === p || !t.joined || !t.st || !p.st) return;
+      const dx = t.st[0] - p.st[0], dy = t.st[1] - p.st[1], dz = t.st[2] - p.st[2];
+      if (dx * dx + dy * dy + dz * dz > PUNCH_MAX_DIST * PUNCH_MAX_DIST) return;
+      p.lastHit = now;
+      if (t.god) return;   // ADM em modo deus nao toma dano
+      broadcast({ t: "hurt", id: t.id, from: id, d: PUNCH_DAMAGE });
       return;
     }
 
