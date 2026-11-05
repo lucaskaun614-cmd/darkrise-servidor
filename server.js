@@ -249,8 +249,11 @@ function needPos(p, q) {
 // ---------------------------------------------------------------- acesso do dono
 function isOwnerCode(text) {
   if (!OWNER_CODE) return false;
-  const a = Buffer.from(text.trim());
-  const b = Buffer.from(OWNER_CODE);
+  // Aceita o codigo com ou sem "/" na frente, tanto no que o jogador digita quanto no OWNER_CODE do Render.
+  const strip = (t) => String(t).trim().replace(/^\/+/, "");
+  const a = Buffer.from(strip(text));
+  const b = Buffer.from(strip(OWNER_CODE));
+  if (!b.length) return false;
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function ownerAccess(p) {
