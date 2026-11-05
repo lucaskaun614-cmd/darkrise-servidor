@@ -82,6 +82,7 @@ const USAGE = [
   [5, "/spawnobjeto", "modelo", "Cria um objeto"],
   [5, "/teleport", "ID X Y Z", "Teleporta para coordenadas"],
   [5, "/godmode", "ID", "Liga/desliga god mode"],
+  [5, "/doze", "me|ID balas", "Dá a espingarda Doze com munição (ex.: /doze me 100)"],
   [5, "/manutencao", "on|off", "Modo manutenção"],
   [5, "/configservidor", "", "Mostra a configuração"],
 ];
@@ -556,6 +557,22 @@ const H = {
   },
   spawnnpc(p, a) { spawn(p, "npc", a[0], 1); },
   spawnobjeto(p, a) { spawn(p, "objeto", a[0], 1); },
+  doze(p, a) {
+    let r;
+    if (norm(a[0]) === "me") r = { id: p.id, t: p };
+    else { r = findTarget(p, a[0]); if (!r) return; }
+    const n = int(a[1], 1, 500);
+    if (n === null) { sys(p, "Use: /doze me <balas>  ou  /doze <id> <balas>  (1 a 500).", "err"); return; }
+    r.t.doze = true;
+    r.t.ammo = Math.min(DOZE_MAX_AMMO, (r.t.ammo || 0) + n);
+    send(r.t.ws, { t: "weapon", has: 1, ammo: r.t.ammo });
+    slog(p, "doze", r.t.name, n + " balas");
+    if (r.t === p) sys(p, "Você recebeu a Doze com " + n + " balas (total: " + p.ammo + ").", "ok");
+    else {
+      sys(p, labelOf(r.id, r.t) + " recebeu " + n + " balas da Doze (total: " + r.t.ammo + ").", "ok");
+      sys(r.t, "Um administrador te deu a Doze com " + n + " balas.", "ok");
+    }
+  },
   godmode(p, a) {
     const r = findTarget(p, a[0]); if (!r) return;
     if (!guard(p, r.t, "mudar o god mode de", true)) return;
@@ -653,6 +670,13 @@ function runCommand(id, p, text) {
 const PUNCH_DAMAGE = 7;          // dano por soco (vida maxima 100)
 const PUNCH_COOLDOWN_MS = 300;   // minimo entre dois socos do mesmo jogador
 const PUNCH_MAX_DIST = 3.6;      // distancia maxima aceita (metros)
+// Espingarda Doze (so ADM 5 entrega com /doze). O servidor controla municao, cadencia, alcance e dano.
+const DOZE_MAX_AMMO = 999;
+const DOZE_COOLDOWN_MS = 650;    // minimo entre dois tiros
+const DOZE_RANGE = 28;           // alcance maximo (metros)
+const DOZE_DMG_MAX = 80;         // dano de perto (ate 3 m)
+const DOZE_DMG_MIN = 18;         // dano no alcance maximo
+const DOZE_HEAR_DIST = 60;       // quem esta ate aqui ve o clarao / ouve o tiro
 
 
 // ---------------------------------------------------------------- login com Google
@@ -792,7 +816,8 @@ wss.on("connection", (ws) => {
   if (id === 0) { ws.close(1013, "servidor cheio"); return; }
   const p = { id, ws, st: null, hadNear: false, msgs: 0, alive: true, joined: false,
               name: "", gender: "m", dev: "", dk: "", level: 0, invis: false, skin: "normal",
-              police: "", god: false, lastChat: 0, fails: [], cmdBlock: 0 };
+              police: "", god: false, lastChat: 0, fails: [], cmdBlock: 0,
+              doze: false, ammo: 0, w: 0, lastShot: 0 };
   players.set(id, p);
 
   ws.on("pong", () => { p.alive = true; });
@@ -873,6 +898,7 @@ wss.on("connection", (ws) => {
       if (![x, y, z, yaw, speed].every(Number.isFinite)) return;
       if (Math.abs(x) > 5000 || Math.abs(y) > 5000 || Math.abs(z) > 5000) return;
       p.st = [x, y, z, yaw, speed, g ? 1 : 0, k ? 1 : 0];
+      p.w = p.doze ? (Number(m.w) === 2 ? 2 : 1) : 0;   // 0 sem arma, 1 nas costas, 2 nas maos
       return;
     }
 
@@ -905,6 +931,34 @@ wss.on("connection", (ws) => {
       p.lastHit = now;
       if (t.god) return;   // ADM em modo deus nao toma dano
       broadcast({ t: "hurt", id: t.id, from: id, d: PUNCH_DAMAGE });
+      return;
+    }
+
+    if (m.t === "shoot") {
+      // Tiro da Doze: o cliente diz quem acertou; o servidor confere municao, cadencia e distancia.
+      const now = Date.now();
+      if (!p.doze || !p.st) return;
+      if (now - (p.lastShot || 0) < DOZE_COOLDOWN_MS) return;
+      if (p.ammo <= 0) { send(ws, { t: "weapon", has: 1, ammo: 0 }); return; }
+      p.lastShot = now;
+      p.ammo -= 1;
+      send(ws, { t: "weapon", has: 1, ammo: p.ammo });
+      const shot = { t: "shot", id };
+      const hear2 = DOZE_HEAR_DIST * DOZE_HEAR_DIST;
+      for (const [oid, other] of players) {
+        if (oid === id || !other.joined || !other.st) continue;
+        const ex = other.st[0] - p.st[0], ey = other.st[1] - p.st[1], ez = other.st[2] - p.st[2];
+        if (ex * ex + ey * ey + ez * ez <= hear2) send(other.ws, shot);
+      }
+      const t = players.get(Number(m.id));
+      if (!t || t === p || !t.joined || !t.st) return;
+      const dx = t.st[0] - p.st[0], dy = t.st[1] - p.st[1], dz = t.st[2] - p.st[2];
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > DOZE_RANGE + 2) return;
+      if (t.god) return;   // ADM em modo deus nao toma dano
+      const f = Math.min(1, Math.max(0, (dist - 3) / (DOZE_RANGE - 3)));
+      const dmg = Math.round(DOZE_DMG_MAX - (DOZE_DMG_MAX - DOZE_DMG_MIN) * f);
+      broadcast({ t: "hurt", id: t.id, from: id, d: dmg });
       return;
     }
 
@@ -946,7 +1000,7 @@ setInterval(() => {
       const dy = o.st[1] - p.st[1];
       const dz = o.st[2] - p.st[2];
       if (dx * dx + dy * dy + dz * dz <= maxD2) {
-        near[oid] = o.st.concat([o.level, o.invis ? 1 : 0, o.skin]);
+        near[oid] = o.st.concat([o.level, o.invis ? 1 : 0, o.skin, o.w || 0]);
         any = true;
       }
     }
