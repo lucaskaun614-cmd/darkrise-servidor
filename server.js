@@ -92,7 +92,7 @@ for (const u of USAGE) CMD_LEVEL[u[1].slice(1)] = u[0];
 // ---------------------------------------------------------------- dados persistentes
 // Aparelhos sao guardados so como hash (se o arquivo vazar, ninguem consegue se passar por um ADM).
 const EMPTY_DB = () => ({
-  ownerDev: "", staff: {}, police: {}, skins: {}, bans: [], banSeq: 0, mutes: {}, glink: {},
+  ownerDev: "", staff: {}, police: {}, skins: {}, bans: [], banSeq: 0, mutes: {}, glink: {}, chars: {},
   history: [], logs: [], maintenance: false,
 });
 function loadDb() {
@@ -768,6 +768,24 @@ async function googleCallback(url, res) {
   }
 }
 function handleAuth(req, res, url) {
+  // Personagem guardado na conta Google (sobrevive a reinstalar o app / limpar dados).
+  if (url.pathname === "/auth/char" || url.pathname === "/auth/charset") {
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    const a = verifyAuth(url.searchParams.get("t") || "");
+    if (!a) { res.end(JSON.stringify({ ok: false })); return true; }
+    if (!db.chars) db.chars = {};
+    if (url.pathname === "/auth/charset") {
+      const n = url.searchParams.get("n") || "", sn = url.searchParams.get("s") || "", g = url.searchParams.get("g") === "f" ? "f" : "m";
+      if (!/^[A-Za-z]{2,14}$/.test(n) || !/^[A-Za-z]{2,14}$/.test(sn)) { res.end(JSON.stringify({ ok: false })); return true; }
+      db.chars[a.sub] = { n, s: sn, g };
+      saveDb();
+      res.end(JSON.stringify({ ok: true }));
+      return true;
+    }
+    const c = db.chars[a.sub];
+    res.end(JSON.stringify(c ? { ok: true, has: true, n: c.n, s: c.s, g: c.g } : { ok: true, has: false }));
+    return true;
+  }
   if (url.pathname === "/auth/poll") {
     const state = url.searchParams.get("s") || "";
     const slot = STATE_RE.test(state) ? pendingAuth.get(state) : null;
@@ -798,6 +816,18 @@ function handleAuth(req, res, url) {
 const server = http.createServer((req, res) => {
   if (req.url && req.url.startsWith("/auth/")) {
     try { if (handleAuth(req, res, new URL(req.url, "http://x"))) return; } catch (e) { res.writeHead(400); res.end("erro"); return; }
+  }
+  if (req.url && req.url.startsWith("/version")) {
+    // Atualizacao automatica: o jogo pergunta aqui qual e a versao mais nova e onde baixar o APK.
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+    res.end(JSON.stringify({
+      code: parseInt(process.env.LATEST_CODE || "0", 10) || 0,
+      name: process.env.LATEST_NAME || "",
+      url: process.env.APK_URL || "",
+      msg: process.env.UPDATE_MSG || "",
+      force: process.env.UPDATE_FORCE === "1",
+    }));
+    return;
   }
   if (req.url && req.url.startsWith("/status")) {
     res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
