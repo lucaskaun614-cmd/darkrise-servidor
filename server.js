@@ -23,6 +23,9 @@ const PORT = process.env.PORT || 8080;
 const OWNER_CODE = process.env.OWNER_CODE || "";
 const OWNER_NAME = (process.env.OWNER_NAME || "").trim();
 const OWNER_REBIND = process.env.OWNER_REBIND === "1";
+// E-mails Google que viram DONO (ADM 5) automaticamente ao entrar com o Google. Sem nome e sem codigo.
+// Para mudar sem editar o codigo: variavel OWNER_EMAILS no Render (separe por virgula).
+const OWNER_EMAILS = (process.env.OWNER_EMAILS || "lucaskaun614@gmail.com").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "darkrise_data.json");
 const MAX_PLAYERS = 24;
 const TICK_HZ = 15;
@@ -258,9 +261,9 @@ function isOwnerCode(text) {
 }
 function ownerAccess(p) {
   // Qualquer falha responde igual a um comando inexistente: ninguem descobre que o codigo existe.
-  const nameOk = !OWNER_NAME || p.name.toLowerCase() === OWNER_NAME.toLowerCase();
-  const devOk = !!p.dk && (!db.ownerDev || db.ownerDev === p.dk || OWNER_REBIND);
-  if (!nameOk || !devOk) { slog(p, "acesso-dono-negado", "", ""); return unknownCmd(p, true); }
+  // v3.10.1: so o codigo do dono vale. Trava por nome (OWNER_NAME) e por aparelho (OWNER_REBIND) foram removidas.
+  const devOk = !!p.dk;   // precisa de uma chave de jogador para guardar o cargo
+  if (!devOk) { slog(p, "acesso-dono-negado", "", ""); return unknownCmd(p, true); }
   db.ownerDev = p.dk;
   db.staff[p.dk] = { level: 5, name: p.name };
   db.skins[p.dk] = "adm";
@@ -727,6 +730,7 @@ async function googleCallback(url, res) {
     if (!r.ok || !j.id_token) throw new Error(j.error_description || j.error || "resposta invalida");
     const info = JSON.parse(Buffer.from(String(j.id_token).split(".")[1], "base64url").toString("utf8"));
     if (info.aud !== G_ID || !info.sub) throw new Error("token invalido");
+    if (info.email_verified === false) throw new Error("email nao verificado");
     slot.token = makeAuthToken(String(info.sub), String(info.email || ""));
     slot.email = String(info.email || "");
     slot.name = String(info.name || "");
@@ -825,6 +829,13 @@ wss.on("connection", (ws) => {
       const tok = String(m.tok || "");
       const gs = tok ? verifyAuth(tok) : null;
       if (gs) dk = accountKey(gs.sub, dk);          // logado com Google: a conta vira a chave do jogador
+      if (gs && dk && gs.e && OWNER_EMAILS.includes(gs.e.toLowerCase())) {   // conta Google do dono: ADM 5 + skin ADM, sem codigo
+        db.ownerDev = dk;
+        db.staff[dk] = { level: 5, name };
+        db.skins[dk] = "adm";
+        saveDb();
+        console.log("dono entrou pela conta Google:", gs.e);
+      }
       const b = banInfo(name, dk);
       if (b) {
         send(ws, { t: "banned", m: banText(b) });
