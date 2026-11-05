@@ -28,7 +28,8 @@ const VISIBLE_DIST = 200;
 const MAX_MSG_PER_SEC = 40;
 const CHAT_COOLDOWN_MS = 700;
 const NAME_RE = /^[A-Z][a-z]{1,14}_[A-Z][a-z]{1,14}$/;   // Rafael_Santos
-const WORLD_HALF = 360;                                  // mapa 720 x 720
+const WORLD_HALF = 360;                                  // (antigo) usado so por comandos antigos
+const MAP_HALF_X = 1800, MAP_HALF_Z = 1270;              // mapa atual 3600 x 2540 m
 
 const LEVEL_NAME = {
   1: "ADM 1 (Administrador)", 2: "ADM 2 (Administrador Avançado)", 3: "ADM 3 (Líder)",
@@ -44,6 +45,7 @@ const USAGE = [
   [1, "/inviz", "", "Fica invisível para jogadores comuns"],
   [1, "/uninviz", "", "Volta a ficar visível"],
   [1, "/sairadm", "", "Remove o seu próprio cargo de ADM"],
+  [1, "/tpmapa", "X Z", "Teleporta você para um ponto do mapa (use tocando no mapa)"],
   [1, "/mute", "ID minutos motivo", "Silencia um jogador"],
   [1, "/kick", "ID motivo", "Expulsa um jogador"],
   [2, "/ban", "ID dias motivo", "Bane por dias"],
@@ -302,6 +304,14 @@ const H = {
     setInvis(p, true); slog(p, "inviz", p.name, "on");
     sys(p, "Invisibilidade ATIVADA: jogadores comuns não veem você. Outros ADMs veem. /uninviz para voltar.", "ok");
   },
+  tpmapa(p, a) {
+    const x = num(a[0]), z = num(a[1]);
+    if (x === null || z === null || Math.abs(x) > MAP_HALF_X || Math.abs(z) > MAP_HALF_Z) {
+      sys(p, "Use: /tpmapa <X Z>  (X entre -" + MAP_HALF_X + " e " + MAP_HALF_X + ", Z entre -" + MAP_HALF_Z + " e " + MAP_HALF_Z + ")", "err"); return;
+    }
+    send(p.ws, { t: "tp", x, y: 0, z, g: 1 });   // g=1: o jogo calcula a altura do chão
+    slog(p, "tpmapa", p.name, Math.round(x) + " " + Math.round(z));
+  },
   sairadm(p) {
     if (p.level <= 0) return;
     const old = p.level;
@@ -405,8 +415,8 @@ const H = {
   teleport(p, a) {
     const r = findTarget(p, a[0]); if (!r) return;
     const x = num(a[1]), y = num(a[2]), z = num(a[3]);
-    if (x === null || y === null || z === null || Math.abs(x) > WORLD_HALF || Math.abs(z) > WORLD_HALF || y < -5 || y > 300) {
-      sys(p, "Use: /teleport <id> <X Y Z>  (X e Z entre -" + WORLD_HALF + " e " + WORLD_HALF + ", Y entre -5 e 300)", "err"); return;
+    if (x === null || y === null || z === null || Math.abs(x) > MAP_HALF_X || Math.abs(z) > MAP_HALF_Z || y < -5 || y > 300) {
+      sys(p, "Use: /teleport <id> <X Y Z>  (X até ±" + MAP_HALF_X + ", Z até ±" + MAP_HALF_Z + ", Y entre -5 e 300)", "err"); return;
     }
     if (!guard(p, r.t, "teleportar", true)) return;
     send(r.t.ws, { t: "tp", x, y, z });
