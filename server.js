@@ -767,7 +767,37 @@ async function googleCallback(url, res) {
     page(res, 500, "Erro", "<h1>Não foi possível entrar</h1><p>Volte ao jogo e tente de novo.</p>");
   }
 }
+// Login nativo (tela "Escolha uma conta" dentro do app): o app manda o ID token do Google e o servidor confere.
+function nativeGoogleLogin(req, res) {
+  const out = (code, o) => { res.writeHead(code, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(o)); };
+  let body = "", dead = false;
+  req.on("data", (c) => { body += c; if (body.length > 12000) { dead = true; out(413, { ok: false }); req.destroy(); } });
+  req.on("end", async () => {
+    if (dead) return;
+    try {
+      if (!G_ID || !G_SECRET) return out(200, { ok: false, err: "nao configurado" });
+      const idt = String((JSON.parse(body) || {}).id_token || "");
+      if (idt.length < 100 || idt.length > 4000) return out(200, { ok: false });
+      const r = await fetch("https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(idt));
+      const info = await r.json();
+      if (!r.ok || info.aud !== G_ID || !info.sub) throw new Error("token invalido");
+      if (String(info.email_verified) === "false") throw new Error("email nao verificado");
+      if (info.exp && Number(info.exp) * 1000 < Date.now()) throw new Error("token expirado");
+      console.log("login google nativo ok:", info.email);
+      out(200, { ok: true, token: makeAuthToken(String(info.sub), String(info.email || "")), email: String(info.email || ""), name: String(info.name || "") });
+    } catch (e) {
+      console.log("erro login nativo:", e.message);
+      out(200, { ok: false });
+    }
+  });
+}
 function handleAuth(req, res, url) {
+  if (url.pathname === "/auth/cfg") {
+    // O app pega aqui o ID de cliente (Web) para abrir a tela nativa "Escolha uma conta".
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ gid: G_ID }));
+    return true;
+  }
   // Personagem guardado na conta Google (sobrevive a reinstalar o app / limpar dados).
   if (url.pathname === "/auth/char" || url.pathname === "/auth/charset") {
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -814,6 +844,7 @@ function handleAuth(req, res, url) {
 }
 
 const server = http.createServer((req, res) => {
+  if (req.method === "POST" && req.url && req.url.startsWith("/auth/idtoken")) { nativeGoogleLogin(req, res); return; }
   if (req.url && req.url.startsWith("/auth/")) {
     try { if (handleAuth(req, res, new URL(req.url, "http://x"))) return; } catch (e) { res.writeHead(400); res.end("erro"); return; }
   }
