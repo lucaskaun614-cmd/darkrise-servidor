@@ -1,0 +1,56 @@
+# Quando um Release e publicado no GitHub, este workflow cria o versao.json sozinho.
+# Assim o aviso de atualizacao sempre aponta para o APK do release mais novo.
+# Regra: o nome da TAG do release deve ser a versao do jogo (ex.: 1.2) e o APK deve ser anexado nele.
+name: Atualizar versao.json
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Gerar versao.json a partir do release
+        env:
+          RELEASE: ${{ toJson(github.event.release) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          r = json.loads(os.environ["RELEASE"])
+          versao = r["tag_name"].lstrip("vV").strip()
+          apks = [a for a in r.get("assets", []) if a["name"].lower().endswith(".apk")]
+          if not apks:
+              raise SystemExit("ERRO: o release nao tem nenhum arquivo .apk anexado. versao.json NAO foi alterado.")
+          url = apks[0]["browser_download_url"]
+          dados = {
+              "versao": versao,
+              "url_apk": url,
+              "mensagem": "Nova versão disponível. Atualize para continuar jogando.",
+          }
+          with open("versao.json", "w", encoding="utf-8") as f:
+              json.dump(dados, f, ensure_ascii=False, indent=2)
+          print("versao:", versao)
+          print("apk:", url)
+          PY
+
+      - name: Salvar no repositorio
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add versao.json
+          if git diff --cached --quiet; then
+            echo "versao.json ja estava igual"
+          else
+            git commit -m "versao.json: $TAG"
+            git push
+          fi
