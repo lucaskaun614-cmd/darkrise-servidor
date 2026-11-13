@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dark Rise - login</title>
+</head>
+<body style="background:#111;color:#eee;font-family:sans-serif;text-align:center;padding:40px">
+<p id="msg">Enviando seu login...</p>
+<script>
+  var RELAY = 'https://darkrise-online.onrender.com';
+  var p = new URLSearchParams(window.location.hash.substring(1));
+  var idToken = p.get('id_token');
+  var state = p.get('state');
+  var msg = document.getElementById('msg');
+  if (!idToken || !state) {
+    msg.textContent = 'Login nao concluido. Volte para o jogo e tente de novo.';
+  } else {
+    fetch(RELAY + '/salvar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: state, id_token: idToken })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      msg.textContent = d.ok ? 'Login feito! Volte para o Dark Rise.' : 'Erro no login. Tente de novo.';
+    }).catch(function () {
+      msg.textContent = 'Sem conexao. Tente de novo.';
+    });
+  }
+</script>
+</body>
+</html>
